@@ -33,6 +33,37 @@ describe('mapMessage', () => {
     });
   });
 
+  it('LID-Adressierung: matcht über remoteJidAlt und speichert die Whitelist-JID', () => {
+    const stored = mapMessage(
+      raw({
+        key: {
+          id: 'MSG9',
+          remoteJid: '123456789012345@lid',
+          remoteJidAlt: '4917xxx@s.whatsapp.net',
+          fromMe: false,
+        },
+      }),
+      whitelist,
+    );
+    expect(stored?.chatJid).toBe('4917xxx@s.whatsapp.net');
+    expect(stored?.chatName).toBe('Wanja');
+  });
+
+  it('LID-Adressierung: verwirft, wenn auch remoteJidAlt nicht gelistet ist', () => {
+    const stored = mapMessage(
+      raw({
+        key: {
+          id: 'MSG10',
+          remoteJid: '123456789012345@lid',
+          remoteJidAlt: '4930999@s.whatsapp.net',
+          fromMe: false,
+        },
+      }),
+      whitelist,
+    );
+    expect(stored).toBeNull();
+  });
+
   it('mappt extendedTextMessage-Text', () => {
     const stored = mapMessage(
       raw({ message: { extendedTextMessage: { text: 'Antwort mit Zitat' } } }),

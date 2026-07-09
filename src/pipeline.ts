@@ -8,6 +8,9 @@ export interface BaileysLikeMessage {
   key: {
     id?: string | null;
     remoteJid?: string | null;
+    /** Baileys v7: bei LID-Adressierung trägt remoteJid "…@lid" und
+     *  remoteJidAlt die Telefonnummern-Adresse ("…@s.whatsapp.net"). */
+    remoteJidAlt?: string | null;
     participant?: string | null;
     fromMe?: boolean | null;
   };
@@ -48,8 +51,21 @@ export function mapMessage(
   raw: BaileysLikeMessage,
   whitelist: Map<string, string>,
 ): StoredMessage | null {
-  const chatJid = raw.key?.remoteJid ?? '';
-  const chatName = whitelist.get(chatJid);
+  // LID-Adressierung: Whitelist gegen beide JID-Formen prüfen; gespeichert
+  // wird immer die Whitelist-JID (kanonische Telefonnummern-Adresse).
+  const candidates = [raw.key?.remoteJid, raw.key?.remoteJidAlt].filter(
+    (jid): jid is string => typeof jid === 'string' && jid !== '',
+  );
+  let chatJid = '';
+  let chatName: string | undefined;
+  for (const jid of candidates) {
+    const name = whitelist.get(jid);
+    if (name !== undefined) {
+      chatJid = jid;
+      chatName = name;
+      break;
+    }
+  }
   if (chatName === undefined) return null;
 
   const msg = raw.message ?? {};
