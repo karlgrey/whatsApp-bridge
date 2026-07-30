@@ -1,9 +1,17 @@
 /**
- * WhatsApp-Bridge v1 — READ-ONLY.
+ * WhatsApp-Bridge v1 — primär READ-ONLY.
  *
  * Verbindet als Linked Device (Baileys), filtert eingehende Nachrichten
  * gegen die Whitelist (config/chats.json) und persistiert Text + Metadaten
- * in data/messages.db. Es gibt bewusst KEINERLEI Sende-Code.
+ * in data/messages.db.
+ *
+ * Send-Kanal (#312, seit 30.07.2026): reiner Ausführungskanal für manuell
+ * abgelegte, einzeln freigegebene Nachrichten in data/outbox/*.json — KEIN
+ * autonomes Senden. Ohne explizites Feature-Flag (config/send.json,
+ * `loadSendConfig`, Default AUS) läuft er im Dry-Run (nur Logging, kein
+ * Versand). Läuft im selben Prozess über dieselbe Baileys-Session — kein
+ * zweiter Prozess, kein zusätzliches Session-Risiko. Details:
+ * docs/superpowers/specs/2026-07-30-outbox-send-channel-design.md.
  */
 import makeWASocket, {
   useMultiFileAuthState,
@@ -19,6 +27,7 @@ import { openDb, insertMessage, setMediaPath, type StoredMessage } from './stora
 import { mapMessage, type BaileysLikeMessage } from './pipeline.js';
 import { planMediaFile } from './media.js';
 import { writeStatus } from './status.js';
+import { startOutboxWatcher, type OutboxWatcherHandle } from './outbox-watcher.js';
 
 const AUTH_DIR = path.join(DATA_DIR, 'auth');
 const BACKOFF_START_MS = 5_000;
@@ -44,6 +53,7 @@ log(`Whitelist: ${whitelist.size} Chat(s) — außerhalb davon wird nichts gespe
 
 const db = openDb();
 let backoffMs = BACKOFF_START_MS;
+let outboxWatcher: OutboxWatcherHandle | null = null;
 
 async function start(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -64,9 +74,23 @@ async function start(): Promise<void> {
       backoffMs = BACKOFF_START_MS;
       log('Verbunden.');
       writeStatus({ connected: true, detail: 'open' });
+      // Outbox-Watcher erst starten, wenn eine gültige Session steht — er
+      // nutzt sock.sendMessage direkt, das darf nie eine tote Session treffen.
+      outboxWatcher?.stop();
+      outboxWatcher = startOutboxWatcher({
+        sendFn: async (chatJid, text) => {
+          await sock.sendMessage(chatJid, { text });
+        },
+        log,
+      });
     }
 
     if (connection === 'close') {
+      // Watcher stoppen, solange keine gültige Session existiert — verhindert
+      // sendMessage-Aufrufe auf einem toten Socket während Reconnect/Backoff.
+      outboxWatcher?.stop();
+      outboxWatcher = null;
+
       const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)
         ?.output?.statusCode;
       if (statusCode === DisconnectReason.loggedOut) {
