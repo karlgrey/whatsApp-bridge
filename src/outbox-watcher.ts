@@ -76,6 +76,41 @@ function logResult(
   log(`Outbox ${fileName}: ${result}${detail ? ` (${detail})` : ''}`);
 }
 
+export interface OutboxWatcherHandle {
+  stop(): void;
+}
+
+/** Poll-Intervall — kein fs-Watch, damit ein liegender Prozess-Hänger nicht zu verpassten Events führt. */
+export const POLL_INTERVAL_MS = 5_000;
+
+/**
+ * Startet das Polling (setInterval, kein fs.watch — robuster bei
+ * verzögertem/gebatchtem FS-Events auf macOS). Räumt vor dem ersten Tick
+ * Crash-Reste aus einem vorherigen Lauf weg (recoverOrphans). Reentranz-Schutz:
+ * ein laufender Tick blockiert den nächsten, überlappende Läufe sind
+ * ausgeschlossen. `stop()` beendet das Polling (z. B. bei Verbindungsverlust,
+ * da der injizierte sendFn dann eine tote Session nutzen würde).
+ */
+export function startOutboxWatcher(
+  opts: OutboxWatcherOptions & { intervalMs?: number },
+): OutboxWatcherHandle {
+  const log = opts.log ?? (() => {});
+  recoverOrphans({ ...opts, log });
+
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    processOutboxOnce(opts)
+      .catch((err) => log(`Outbox-Watcher-Fehler: ${String(err)}`))
+      .finally(() => {
+        running = false;
+      });
+  }, opts.intervalMs ?? POLL_INTERVAL_MS);
+
+  return { stop: () => clearInterval(timer) };
+}
+
 /**
  * Ein Durchlauf: verarbeitet alle *.json-Dateien direkt in outboxDir
  * (Unterordner done/failed/.processing werden nicht rekursiv gescannt).
