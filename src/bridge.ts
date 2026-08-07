@@ -12,12 +12,19 @@
  * Versand). Läuft im selben Prozess über dieselbe Baileys-Session — kein
  * zweiter Prozess, kein zusätzliches Session-Risiko. Details:
  * docs/superpowers/specs/2026-07-30-outbox-send-channel-design.md.
+ *
+ * WA-Web-Version (#326, seit 07.08.2026): wird beim Prozessstart einmalig
+ * dynamisch über `resolveWaVersion()` aufgelöst (Fallback-Kette wa-web →
+ * Baileys-Repo → Paket-Default) statt fest im installierten Baileys-Paket
+ * zu hängen — Prävention gegen das wiederkehrende 405-Muster (zuletzt #325,
+ * 30.07.2026, per manuellem Paket-Bump behoben). Details: src/wa-version.ts.
  */
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   downloadMediaMessage,
   type WAMessage,
+  type WAVersion,
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import path from 'node:path';
@@ -28,6 +35,7 @@ import { mapMessage, type BaileysLikeMessage } from './pipeline.js';
 import { planMediaFile } from './media.js';
 import { writeStatus } from './status.js';
 import { startOutboxWatcher, type OutboxWatcherHandle } from './outbox-watcher.js';
+import { resolveWaVersion } from './wa-version.js';
 
 const AUTH_DIR = path.join(DATA_DIR, 'auth');
 const BACKOFF_START_MS = 5_000;
@@ -54,10 +62,19 @@ log(`Whitelist: ${whitelist.size} Chat(s) — außerhalb davon wird nichts gespe
 const db = openDb();
 let backoffMs = BACKOFF_START_MS;
 let outboxWatcher: OutboxWatcherHandle | null = null;
+// Einmal pro Prozess aufgelöst (nicht pro Reconnect) — WA-Web-Versionswechsel
+// sind selten, wiederholte Netzwerk-Roundtrips bei jedem Backoff wären unnötig.
+let waVersion: WAVersion | null = null;
 
 async function start(): Promise<void> {
+  if (!waVersion) {
+    const resolved = await resolveWaVersion({ log });
+    waVersion = resolved.version;
+    log(`WA-Web-Version aufgelöst: ${waVersion.join('.')} (Quelle: ${resolved.source})`);
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const sock = makeWASocket({ auth: state });
+  const sock = makeWASocket({ auth: state, version: waVersion });
 
   sock.ev.on('creds.update', saveCreds);
 
