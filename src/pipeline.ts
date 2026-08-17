@@ -43,6 +43,16 @@ function toUnixSeconds(ts: BaileysLikeMessage['messageTimestamp']): number {
 }
 
 /**
+ * WhatsApp-Stories laufen über das Pseudo-Chat-JID "status@broadcast",
+ * Kanäle über "@newsletter", alte Broadcast-Listen über "@broadcast".
+ * Keine davon sind echte Chat-Nachrichten (#412) — werden hart verworfen,
+ * unabhängig von der Whitelist (die sie ohnehin nie enthalten sollte).
+ */
+function isStoryOrBroadcastJid(jid: string): boolean {
+  return jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast');
+}
+
+/**
  * Whitelist-Filter + Mapping auf StoredMessage.
  * null = verwerfen (Chat nicht auf der Whitelist ODER weder Text noch Medium).
  * Nachrichten außerhalb der Whitelist werden NIE persistiert.
@@ -56,6 +66,7 @@ export function mapMessage(
   const candidates = [raw.key?.remoteJid, raw.key?.remoteJidAlt].filter(
     (jid): jid is string => typeof jid === 'string' && jid !== '',
   );
+  if (candidates.some(isStoryOrBroadcastJid)) return null;
   let chatJid = '';
   let chatName: string | undefined;
   for (const jid of candidates) {

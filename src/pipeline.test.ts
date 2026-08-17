@@ -91,6 +91,28 @@ describe('mapMessage', () => {
     expect(stored?.senderName).toBe('Micha');
   });
 
+  it('verwirft WhatsApp-Stories (status@broadcast) auch bei versehentlichem Whitelist-Eintrag (#412)', () => {
+    const wl = new Map([['status@broadcast', 'Status']]);
+    const stored = mapMessage(
+      raw({ key: { id: 'MSGS', remoteJid: 'status@broadcast', fromMe: false } }),
+      wl,
+    );
+    expect(stored).toBeNull();
+  });
+
+  it('verwirft Newsletter-/Broadcast-Kanäle (#412)', () => {
+    const wl = new Map([
+      ['12345@newsletter', 'Kanal'],
+      ['67890@broadcast', 'Broadcast-Liste'],
+    ]);
+    expect(
+      mapMessage(raw({ key: { id: 'MSGN', remoteJid: '12345@newsletter', fromMe: false } }), wl),
+    ).toBeNull();
+    expect(
+      mapMessage(raw({ key: { id: 'MSGB', remoteJid: '67890@broadcast', fromMe: false } }), wl),
+    ).toBeNull();
+  });
+
   it('Gruppen-Nachricht: sender = participant', () => {
     const groupWl = new Map([['1203630@g.us', 'Team Uferstraße']]);
     const stored = mapMessage(
