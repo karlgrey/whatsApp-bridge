@@ -18,11 +18,26 @@
  * Baileys-Repo → Paket-Default) statt fest im installierten Baileys-Paket
  * zu hängen — Prävention gegen das wiederkehrende 405-Muster (zuletzt #325,
  * 30.07.2026, per manuellem Paket-Bump behoben). Details: src/wa-version.ts.
+ *
+ * Lücken-Erkennung + Nachhol-Sync (#483, seit 26.08.2026): Baileys' eigener
+ * Offline-Redelivery ("handled N offline messages/notifications" beim
+ * Reconnect) deckt nachweislich nicht jede Trennung ab — im Vorfall #483
+ * wiederholt "handled 0" trotz nachweislich verschickter Nachricht. Echtes
+ * Nachfordern verpasster Nachrichten ist mit Baileys v7 nicht zuverlässig
+ * möglich (fetchMessageHistory braucht einen Anker in genau dem Chat +
+ * ein erreichbares Telefon, liefert asynchron über 'messaging-history.set'
+ * und ist für proaktives Pollen nicht vorgesehen). Deshalb zweigleisig:
+ * (1) 'messaging-history.set' wird jetzt überhaupt verarbeitet (vorher
+ * komplett ignoriert — jede Nachricht, die Baileys darüber nachliefert,
+ * ging bisher spurlos verloren), (2) jedes Offline-Fenster oberhalb der
+ * Schwelle wird in status.json unter "gaps" vermerkt (src/gap-detector.ts),
+ * damit Standups blinde Fenster erkennen statt Vollständigkeit anzunehmen.
  */
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   downloadMediaMessage,
+  proto,
   type WAMessage,
   type WAVersion,
 } from '@whiskeysockets/baileys';
@@ -33,13 +48,18 @@ import { DATA_DIR, loadWhitelist } from './config.js';
 import { openDb, insertMessage, setMediaPath, type StoredMessage } from './storage.js';
 import { mapMessage, type BaileysLikeMessage } from './pipeline.js';
 import { planMediaFile } from './media.js';
-import { writeStatus } from './status.js';
+import { writeStatus, readStatus } from './status.js';
+import { detectGap, appendGap, type ConnectionGap } from './gap-detector.js';
 import { startOutboxWatcher, type OutboxWatcherHandle } from './outbox-watcher.js';
 import { resolveWaVersion } from './wa-version.js';
 
 const AUTH_DIR = path.join(DATA_DIR, 'auth');
 const BACKOFF_START_MS = 5_000;
 const BACKOFF_MAX_MS = 60_000;
+/** Offline-Fenster oberhalb dieser Dauer gelten als Lücke (#483). */
+const GAP_THRESHOLD_MS = 2 * 60_000;
+/** status.json soll nicht unbegrenzt wachsen. */
+const MAX_GAP_ENTRIES = 50;
 
 function log(msg: string): void {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -65,6 +85,20 @@ let outboxWatcher: OutboxWatcherHandle | null = null;
 // Einmal pro Prozess aufgelöst (nicht pro Reconnect) — WA-Web-Versionswechsel
 // sind selten, wiederholte Netzwerk-Roundtrips bei jedem Backoff wären unnötig.
 let waVersion: WAVersion | null = null;
+// Beim Prozessstart aus status.json vorbelegen — Neustarts (Crash, Re-Pairing)
+// sollen bereits erkannte Lücken nicht verwerfen (#483).
+let gaps: ConnectionGap[] = readStatus()?.gaps ?? [];
+// Zeitpunkt der letzten Trennung, solange keine neue Verbindung offen ist —
+// null = aktuell keine offene Trennung erfasst (verbunden oder Prozessstart).
+// Bleibt über mehrere fehlgeschlagene Reconnect-Versuche hinweg gesetzt
+// (jede davon feuert 'close' erneut, ohne dass zwischendurch 'open' kam) —
+// sonst würde jeder gescheiterte Versuch den Lücken-Start nach vorn schieben.
+let disconnectedAt: number | null = null;
+
+/** writeStatus-Wrapper, der die aktuell bekannten Lücken immer mitschreibt. */
+function writeBridgeStatus(state: { connected: boolean; detail?: string }): void {
+  writeStatus({ ...state, gaps });
+}
 
 async function start(): Promise<void> {
   if (!waVersion) {
@@ -84,13 +118,27 @@ async function start(): Promise<void> {
     if (qr) {
       log('QR-Code für Pairing (WhatsApp → Einstellungen → Verknüpfte Geräte):');
       qrcode.generate(qr, { small: true });
-      writeStatus({ connected: false, detail: 'warte auf QR-Pairing' });
+      writeBridgeStatus({ connected: false, detail: 'warte auf QR-Pairing' });
     }
 
     if (connection === 'open') {
       backoffMs = BACKOFF_START_MS;
       log('Verbunden.');
-      writeStatus({ connected: true, detail: 'open' });
+      // Lücken-Erkennung (#483): disconnectedAt ist gesetzt, seit die
+      // Verbindung zuletzt (ggf. über mehrere gescheiterte Reconnect-
+      // Versuche hinweg) weg war — jetzt sind wir wieder offen.
+      if (disconnectedAt !== null) {
+        const gap = detectGap(disconnectedAt, Date.now(), GAP_THRESHOLD_MS);
+        if (gap) {
+          gaps = appendGap(gaps, gap, MAX_GAP_ENTRIES);
+          log(
+            `Lücke erkannt: ${gap.minutes} Min. ohne Verbindung (${gap.from} → ${gap.to}) — ` +
+              'in dieser Zeit verschickte Nachrichten sind evtl. nicht erfasst (#483).',
+          );
+        }
+        disconnectedAt = null;
+      }
+      writeBridgeStatus({ connected: true, detail: 'open' });
       // Outbox-Watcher erst starten, wenn eine gültige Session steht — er
       // nutzt sock.sendMessage direkt, das darf nie eine tote Session treffen.
       outboxWatcher?.stop();
@@ -107,18 +155,23 @@ async function start(): Promise<void> {
       // sendMessage-Aufrufe auf einem toten Socket während Reconnect/Backoff.
       outboxWatcher?.stop();
       outboxWatcher = null;
+      // Nur beim ERSTEN 'close' einer Trennungs-Serie setzen — sonst würde
+      // jeder gescheiterte Reconnect-Versuch den Lücken-Start verschleppen.
+      if (disconnectedAt === null) {
+        disconnectedAt = Date.now();
+      }
 
       const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)
         ?.output?.statusCode;
       if (statusCode === DisconnectReason.loggedOut) {
         log('Abgemeldet (loggedOut) — NICHT reconnecten. Bitte neu pairen: npm run dev');
-        writeStatus({ connected: false, detail: 'loggedOut — bitte neu pairen (npm run dev)' });
+        writeBridgeStatus({ connected: false, detail: 'loggedOut — bitte neu pairen (npm run dev)' });
         process.exit(0);
       }
       const delay = backoffMs;
       backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
       log(`Verbindung getrennt (Code ${statusCode ?? 'unbekannt'}) — Reconnect in ${delay / 1000}s.`);
-      writeStatus({ connected: false, detail: `getrennt (Code ${statusCode ?? 'unbekannt'}), Reconnect geplant` });
+      writeBridgeStatus({ connected: false, detail: `getrennt (Code ${statusCode ?? 'unbekannt'}), Reconnect geplant` });
       setTimeout(() => {
         start().catch((err) => {
           log(`Reconnect fehlgeschlagen: ${String(err)}`);
@@ -128,13 +181,20 @@ async function start(): Promise<void> {
     }
   });
 
-  sock.ev.on('messages.upsert', ({ messages }) => {
+  /**
+   * Verarbeitet eine Charge eingehender Nachrichten (live über
+   * 'messages.upsert' oder nachgeliefert über 'messaging-history.set',
+   * #483) — Whitelist-Filter + Mapping + Speichern + Medien-Download.
+   * `label` landet im Log, um Nachhol-Treffer von Live-Nachrichten zu
+   * unterscheiden.
+   */
+  function processMessages(messages: unknown[], label: string): void {
     for (const raw of messages) {
       try {
         const stored = mapMessage(raw as unknown as BaileysLikeMessage, whitelist);
         if (stored) {
           insertMessage(db, stored);
-          log(`Gespeichert: ${stored.chatName} (${stored.mediaType ?? 'text'})`);
+          log(`Gespeichert${label}: ${stored.chatName} (${stored.mediaType ?? 'text'})`);
           if (stored.mediaType) {
             void downloadMedia(raw as WAMessage, stored).catch((err) => {
               log(`Medien-Download fehlgeschlagen (${stored.id}): ${String(err)}`);
@@ -142,9 +202,32 @@ async function start(): Promise<void> {
           }
         }
       } catch (err) {
-        log(`Fehler beim Verarbeiten einer Nachricht: ${String(err)}`);
+        log(`Fehler beim Verarbeiten einer Nachricht${label}: ${String(err)}`);
       }
     }
+  }
+
+  sock.ev.on('messages.upsert', ({ messages }) => {
+    processMessages(messages, '');
+  });
+
+  /**
+   * Nachhol-Sync (#483): Baileys liefert nach Reconnects gelegentlich einen
+   * History-Sync-Batch statt (oder zusätzlich zu) einzelnen 'messages.upsert'-
+   * Events — vorher komplett ignoriert, jede darüber nachgelieferte Nachricht
+   * ging spurlos verloren. INITIAL_BOOTSTRAP (kompletter History-Sync beim
+   * Erst-Pairing) wird ausgelassen: dafür ist diese Session längst durch das
+   * History-Sync-Fenster (Whitelist per Hand gebaut, siehe Wiki), und ein
+   * erneutes Auftreten wäre ein voller Chat-Export, keine Reconnect-Lücke.
+   */
+  sock.ev.on('messaging-history.set', ({ messages, syncType }) => {
+    if (syncType === proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP) {
+      log(`Nachhol-Sync übersprungen: INITIAL_BOOTSTRAP (${messages.length} Nachrichten, kein Reconnect-Fall).`);
+      return;
+    }
+    if (messages.length === 0) return;
+    log(`Nachhol-Sync empfangen: ${messages.length} Nachricht(en), syncType=${syncType ?? 'unbekannt'}.`);
+    processMessages(messages, ' (Nachhol-Sync)');
   });
 
   /**
@@ -170,9 +253,9 @@ async function start(): Promise<void> {
   }
 }
 
-writeStatus({ connected: false, detail: 'startet' });
+writeBridgeStatus({ connected: false, detail: 'startet' });
 start().catch((err) => {
   log(`Start fehlgeschlagen: ${String(err)}`);
-  writeStatus({ connected: false, detail: `Start fehlgeschlagen: ${String(err)}` });
+  writeBridgeStatus({ connected: false, detail: `Start fehlgeschlagen: ${String(err)}` });
   process.exit(1);
 });
