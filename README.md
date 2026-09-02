@@ -52,6 +52,14 @@ Spec Send-Kanal: `docs/superpowers/specs/2026-07-30-outbox-send-channel-design.m
 - Whitelist geändert? Bridge neu starten
   (`launchctl kickstart -k gui/$UID/com.micha.whatsapp-bridge`), die
   Whitelist wird beim Start geladen.
+- **PN↔LID-Mapping (#532):** manche Kontakte sind bei WhatsApp nur noch per
+  LID adressierbar, nicht mehr per Telefonnummer (Baileys v7). Beim Start
+  löst die Bridge für alle Whitelist-Telefonnummern per `sock.onWhatsApp`
+  die LID auf (Log-Zeile pro Kontakt) und lernt zusätzlich aus eingehenden
+  `@lid`-Nachrichten, die `remoteJidAlt` mitliefern. Persistiert in
+  `data/lid-map.json` (gitignored wie der Rest von `data/`). Sende- und
+  Empfangsweg nutzen das Mapping als Fallback — Details: `src/jid-resolver.ts`,
+  `src/lid-map.ts`, `src/pipeline.ts`.
 
 ## Outbox-Send-Kanal (#312, Default AUS)
 

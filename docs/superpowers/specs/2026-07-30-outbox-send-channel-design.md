@@ -96,6 +96,7 @@ Format: `<ISO-Timestamp> | <chatJid> | <sent|dry-run|failed|rejected>[ | <Detail
 | `chatJid`/`text` fehlen oder leer | `rejected`, Datei → `failed/` |
 | Feature-Flag aus (Default) | `dry-run` — Log zeigt, was gesendet WÜRDE; Datei → `done/` (kein Fehler, korrekt verarbeitet) |
 | `sock.sendMessage` wirft (z. B. Netzwerkfehler) | `failed`, Datei → `failed/` mit Fehlermeldung im Log |
+| PN weder per Telefonnummer noch per bekannter LID erreichbar (#532, LID-only-Konto z. B. Wanja) | `failed`, Datei → `failed/`, ehrliche Fehlermeldung im Log — NIE stillschweigend als `sent` geloggt (`src/jid-resolver.ts`, `sendToPn` wirft, greift denselben Fehlerpfad wie ein werfendes `sock.sendMessage`) |
 | Verbindung getrennt (`connection.update` → `close`) | Watcher wird gestoppt (`stop()`), bis eine neue Session offen ist — läuft nie gegen einen toten Socket; liegen gebliebene Outbox-Dateien werden beim nächsten `open` weiterverarbeitet |
 | Bridge-Crash zwischen Claim und Ergebnis (Datei liegt in `.processing/`) | Beim nächsten Start räumt `recoverOrphans()` diese Dateien nach `failed/` (Ergebnis `rejected`, Hinweis „unklarer Zustand nach Neustart … manuell prüfen") — bewusst NICHT automatisch erneut senden (Risiko Doppel-Versand) und NICHT stillschweigend verwerfen |
 | Zwei überlappende Poll-Ticks (z. B. ein Tick braucht länger als das Intervall) | Reentranz-Schutz in `startOutboxWatcher` — ein laufender Tick blockiert den nächsten |

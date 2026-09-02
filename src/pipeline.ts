@@ -1,4 +1,5 @@
 import type { StoredMessage } from './storage.js';
+import { pnForLid, type LidMap } from './lid-map.js';
 
 /**
  * Minimaler struktureller Typ für eingehende Baileys-Nachrichten —
@@ -56,10 +57,18 @@ function isStoryOrBroadcastJid(jid: string): boolean {
  * Whitelist-Filter + Mapping auf StoredMessage.
  * null = verwerfen (Chat nicht auf der Whitelist ODER weder Text noch Medium).
  * Nachrichten außerhalb der Whitelist werden NIE persistiert.
+ *
+ * `lidMap` (#532, Default {}): gelerntes PN→LID-Mapping (siehe lid-map.ts).
+ * Fallback, wenn eine eingehende @lid-Nachricht KEIN remoteJidAlt trägt (bei
+ * manchen Kontakten, z. B. Wanja, fehlt es) — die LID wird dann gegen das
+ * Mapping aufgelöst, um die zugehörige Whitelist-PN zu finden. Gespeichert
+ * wird weiterhin immer die kanonische PN-JID (unverändert seit dem
+ * remoteJidAlt-Fix vom 09.07.2026).
  */
 export function mapMessage(
   raw: BaileysLikeMessage,
   whitelist: Map<string, string>,
+  lidMap: LidMap = {},
 ): StoredMessage | null {
   // LID-Adressierung: Whitelist gegen beide JID-Formen prüfen; gespeichert
   // wird immer die Whitelist-JID (kanonische Telefonnummern-Adresse).
@@ -75,6 +84,20 @@ export function mapMessage(
       chatJid = jid;
       chatName = name;
       break;
+    }
+  }
+  // Fallback (#532): keine direkte Whitelist-Übereinstimmung — bei einer
+  // @lid-Nachricht ohne (whitelisted) remoteJidAlt über das PN↔LID-Mapping
+  // versuchen, die zugehörige Whitelist-PN zu finden.
+  if (chatName === undefined) {
+    const lidCandidate = candidates.find((jid) => jid.endsWith('@lid'));
+    if (lidCandidate) {
+      const pn = pnForLid(lidMap, lidCandidate);
+      const name = pn !== undefined ? whitelist.get(pn) : undefined;
+      if (pn !== undefined && name !== undefined) {
+        chatJid = pn;
+        chatName = name;
+      }
     }
   }
   if (chatName === undefined) return null;
@@ -106,4 +129,28 @@ export function mapMessage(
     text,
     mediaType,
   };
+}
+
+/**
+ * Lernt eine PN↔LID-Zuordnung aus einer eingehenden Nachricht (#532):
+ * kommt remoteJid als "…@lid" UND remoteJidAlt als Telefonnummern-JID an,
+ * ist das Paar bekannt — unabhängig von der Whitelist (die Filterung
+ * passiert separat in mapMessage). Der Aufrufer (bridge.ts) persistiert das
+ * Paar über lid-map.ts, damit spätere @lid-Nachrichten OHNE remoteJidAlt
+ * (siehe mapMessage-Fallback oben) trotzdem zugeordnet werden können.
+ */
+export function learnLidMappingFromMessage(
+  raw: BaileysLikeMessage,
+): { pn: string; lid: string } | null {
+  const remoteJid = raw.key?.remoteJid;
+  const remoteJidAlt = raw.key?.remoteJidAlt;
+  if (
+    typeof remoteJid === 'string' &&
+    remoteJid.endsWith('@lid') &&
+    typeof remoteJidAlt === 'string' &&
+    remoteJidAlt.endsWith('@s.whatsapp.net')
+  ) {
+    return { pn: remoteJidAlt, lid: remoteJid };
+  }
+  return null;
 }

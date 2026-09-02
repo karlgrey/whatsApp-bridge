@@ -46,12 +46,14 @@ import path from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { DATA_DIR, loadWhitelist } from './config.js';
 import { openDb, insertMessage, setMediaPath, type StoredMessage } from './storage.js';
-import { mapMessage, type BaileysLikeMessage } from './pipeline.js';
+import { mapMessage, learnLidMappingFromMessage, type BaileysLikeMessage } from './pipeline.js';
 import { planMediaFile } from './media.js';
 import { writeStatus, readStatus } from './status.js';
 import { detectGap, appendGap, type ConnectionGap } from './gap-detector.js';
 import { startOutboxWatcher, type OutboxWatcherHandle } from './outbox-watcher.js';
 import { resolveWaVersion } from './wa-version.js';
+import { loadLidMap, saveLidMap, upsertLidMapping, type LidMap } from './lid-map.js';
+import { sendToPn, resolveWhitelistLids } from './jid-resolver.js';
 
 const AUTH_DIR = path.join(DATA_DIR, 'auth');
 const BACKOFF_START_MS = 5_000;
@@ -94,6 +96,23 @@ let gaps: ConnectionGap[] = readStatus()?.gaps ?? [];
 // (jede davon feuert 'close' erneut, ohne dass zwischendurch 'open' kam) —
 // sonst würde jeder gescheiterte Versuch den Lücken-Start nach vorn schieben.
 let disconnectedAt: number | null = null;
+// PN↔LID-Mapping (#532): beim Start aus data/lid-map.json vorbelegen, danach
+// im Prozess laufend erweitert (Whitelist-Auflösung + Lernen aus eingehenden
+// Nachrichten + Sende-Weg) und bei jeder Änderung sofort persistiert.
+let lidMap: LidMap = loadLidMap();
+// Whitelist-weite LID-Auflösung läuft nur einmal pro Prozess (nicht bei
+// jedem Reconnect) — analog zu waVersion, unnötige USync-Roundtrips vermeiden.
+let whitelistLidsResolved = false;
+
+/** Persistiert einen neuen/aktualisierten PN→LID-Eintrag, No-Op wenn unverändert. */
+function learnLid(pn: string, lid: string): void {
+  const { map, changed } = upsertLidMapping(lidMap, pn, lid);
+  if (changed) {
+    lidMap = map;
+    saveLidMap(lidMap);
+    log(`PN↔LID gelernt: ${pn} → ${lid}.`);
+  }
+}
 
 /** writeStatus-Wrapper, der die aktuell bekannten Lücken immer mitschreibt. */
 function writeBridgeStatus(state: { connected: boolean; detail?: string }): void {
@@ -143,11 +162,39 @@ async function start(): Promise<void> {
       // nutzt sock.sendMessage direkt, das darf nie eine tote Session treffen.
       outboxWatcher?.stop();
       outboxWatcher = startOutboxWatcher({
+        // PN↔LID-Auflösung (#532): erst frisch per onWhatsApp versuchen (wie
+        // bisher); schlägt das fehl, aber eine LID ist bekannt, wird an die
+        // LID gesendet; ist gar keine Zustellung möglich, wirft sendToPn —
+        // der Watcher markiert die Datei dann "failed" statt "sent" (siehe
+        // outbox-watcher.ts, unverändert).
         sendFn: async (chatJid, text) => {
-          await sock.sendMessage(chatJid, { text });
+          await sendToPn(chatJid, text, {
+            onWhatsApp: (jid) => sock.onWhatsApp(jid),
+            sendMessage: async (jid, t) => {
+              await sock.sendMessage(jid, { text: t });
+            },
+            knownLid: lidMap[chatJid],
+            onLearnedLid: (lid) => learnLid(chatJid, lid),
+            log,
+          });
         },
         log,
       });
+
+      // Whitelist-weite LID-Auflösung (#532): einmal pro Prozess (nicht bei
+      // jedem Reconnect), läuft im Hintergrund und blockiert 'open' nicht.
+      // Ergebnis + pro Kontakt eine Log-Zeile (Verifikationsgrundlage nach
+      // Deploy) — siehe jid-resolver.ts.
+      if (!whitelistLidsResolved) {
+        whitelistLidsResolved = true;
+        log(`PN↔LID-Auflösung der Whitelist gestartet (${whitelist.size} Chat(s)).`);
+        void resolveWhitelistLids(whitelist, (jid) => sock.onWhatsApp(jid), log).then(({ map }) => {
+          for (const [pn, lid] of Object.entries(map)) {
+            learnLid(pn, lid);
+          }
+          log('PN↔LID-Auflösung der Whitelist abgeschlossen.');
+        });
+      }
     }
 
     if (connection === 'close') {
@@ -191,7 +238,15 @@ async function start(): Promise<void> {
   function processMessages(messages: unknown[], label: string): void {
     for (const raw of messages) {
       try {
-        const stored = mapMessage(raw as unknown as BaileysLikeMessage, whitelist);
+        const likeMsg = raw as unknown as BaileysLikeMessage;
+        // PN↔LID-Lernen (#532): trägt remoteJid=@lid + remoteJidAlt=PN — das
+        // Paar ins Mapping übernehmen, unabhängig von der Whitelist (sie
+        // hilft künftigen @lid-Nachrichten OHNE remoteJidAlt, siehe
+        // pipeline.ts mapMessage-Fallback).
+        const learned = learnLidMappingFromMessage(likeMsg);
+        if (learned) learnLid(learned.pn, learned.lid);
+
+        const stored = mapMessage(likeMsg, whitelist, lidMap);
         if (stored) {
           insertMessage(db, stored);
           log(`Gespeichert${label}: ${stored.chatName} (${stored.mediaType ?? 'text'})`);

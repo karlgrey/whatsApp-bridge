@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mapMessage, type BaileysLikeMessage } from './pipeline.js';
+import { mapMessage, learnLidMappingFromMessage, type BaileysLikeMessage } from './pipeline.js';
 
 const whitelist = new Map([['4917xxx@s.whatsapp.net', 'Wanja']]);
 
@@ -113,6 +113,47 @@ describe('mapMessage', () => {
     ).toBeNull();
   });
 
+  it('LID-Adressierung ohne remoteJidAlt (#532, z. B. Wanja): matcht über bekanntes PN↔LID-Mapping', () => {
+    const stored = mapMessage(
+      raw({
+        key: {
+          id: 'MSG11',
+          remoteJid: '999888777@lid',
+          fromMe: false,
+        },
+      }),
+      whitelist,
+      { '4917xxx@s.whatsapp.net': '999888777@lid' },
+    );
+    expect(stored?.chatJid).toBe('4917xxx@s.whatsapp.net');
+    expect(stored?.chatName).toBe('Wanja');
+  });
+
+  it('LID-Adressierung ohne remoteJidAlt: verwirft, wenn die LID im Mapping fehlt', () => {
+    const stored = mapMessage(
+      raw({
+        key: { id: 'MSG12', remoteJid: '999888777@lid', fromMe: false },
+      }),
+      whitelist,
+      {},
+    );
+    expect(stored).toBeNull();
+  });
+
+  it('LID-Adressierung ohne remoteJidAlt: verwirft, wenn die gemappte PN nicht auf der Whitelist steht', () => {
+    const stored = mapMessage(
+      raw({ key: { id: 'MSG13', remoteJid: '999888777@lid', fromMe: false } }),
+      whitelist,
+      { '4930999@s.whatsapp.net': '999888777@lid' },
+    );
+    expect(stored).toBeNull();
+  });
+
+  it('ohne lidMap-Argument (Default {}) funktioniert weiterhin wie zuvor', () => {
+    const stored = mapMessage(raw(), whitelist);
+    expect(stored?.chatJid).toBe('4917xxx@s.whatsapp.net');
+  });
+
   it('Gruppen-Nachricht: sender = participant', () => {
     const groupWl = new Map([['1203630@g.us', 'Team Uferstraße']]);
     const stored = mapMessage(
@@ -123,5 +164,47 @@ describe('mapMessage', () => {
     );
     expect(stored?.sender).toBe('4917yyy@s.whatsapp.net');
     expect(stored?.chatName).toBe('Team Uferstraße');
+  });
+});
+
+describe('learnLidMappingFromMessage', () => {
+  it('extrahiert {pn, lid}, wenn remoteJid=@lid UND remoteJidAlt eine Telefonnummern-JID ist', () => {
+    const pair = learnLidMappingFromMessage(
+      raw({
+        key: {
+          id: 'MSG20',
+          remoteJid: '999888777@lid',
+          remoteJidAlt: '4917xxx@s.whatsapp.net',
+          fromMe: false,
+        },
+      }),
+    );
+    expect(pair).toEqual({ pn: '4917xxx@s.whatsapp.net', lid: '999888777@lid' });
+  });
+
+  it('liefert null ohne remoteJidAlt', () => {
+    const pair = learnLidMappingFromMessage(
+      raw({ key: { id: 'MSG21', remoteJid: '999888777@lid', fromMe: false } }),
+    );
+    expect(pair).toBeNull();
+  });
+
+  it('liefert null, wenn remoteJid keine LID ist (normale PN-Adressierung)', () => {
+    const pair = learnLidMappingFromMessage(raw());
+    expect(pair).toBeNull();
+  });
+
+  it('liefert null, wenn remoteJidAlt keine Telefonnummern-JID ist (z. B. Gruppe)', () => {
+    const pair = learnLidMappingFromMessage(
+      raw({
+        key: {
+          id: 'MSG22',
+          remoteJid: '999888777@lid',
+          remoteJidAlt: '1203630@g.us',
+          fromMe: false,
+        },
+      }),
+    );
+    expect(pair).toBeNull();
   });
 });
