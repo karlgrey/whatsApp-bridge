@@ -22,7 +22,16 @@ Spec Send-Kanal: `docs/superpowers/specs/2026-07-30-outbox-send-channel-design.m
   wird vermerkt.
 - **Daten bleiben lokal:** `data/` (Auth-State, DB, Logs, Status, Outbox) und
   die echte `config/chats.json` sind gitignored. Chat-Rohinhalte gehen nie
-  ins Wiki, nie in Deploy-Repos, nie auf Server.
+  ins Wiki, nie in Deploy-Repos, nie auf einen Server mit Angriffsfläche nach
+  außen (App-Server, pm2, `/opt`). **Präzisierung (seit #674, 18.09.2026):**
+  erlaubte Ausnahme ist ausschließlich der **Claude-Arbeitsplatz auf labs**
+  (`labs.remoterepublic.com`, eigener Unix-User `claude`, Home 700, kein
+  sudo, kein öffentlich erreichbarer Dienst) — ein Trusted Endpoint wie
+  Michas Laptop, kein App-Server. Begründung/Kernschutz:
+  `wiki/prozesse/Server-App anbinden.md` (TheBrain2), Abschnitt
+  „Claude-Arbeitsplatz auf labs"; Betrieb dort: `systemd/README.md`.
+  Chat-Rohinhalte tragen auf labs dasselbe Risikoprofil wie `wiki/privat/`
+  (Entscheid Micha, 17.09.2026).
 - ToS-Hinweis: Linked-Device-Automation verstößt formal gegen WhatsApp-ToS
   (Risiko dokumentiert und akzeptiert, siehe Spec).
 

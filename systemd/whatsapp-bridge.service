@@ -1,0 +1,24 @@
+[Unit]
+Description=WhatsApp-Bridge (Baileys) — Mitlese-Dienst fuer Michas WhatsApp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Development/whatsapp-bridge
+Environment=TZ=Europe/Berlin
+Environment=NVM_DIR=%h/.nvm
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# ExecStart laeuft ueber den nvm-Node-Pfad: nvm.sh wird gesourct und schaltet
+# per "nvm use default" auf den fest verdrahteten Alias (siehe systemd/README.md,
+# Schritt "nvm alias default") - das haengt sich NICHT an eine konkrete
+# Patch-Version, die bei einem spaeteren `nvm install` unter demselben User
+# wechseln koennte.
+ExecStart=/bin/bash -lc 'source "%h/.nvm/nvm.sh" && nvm use default >/dev/null && exec npx tsx src/bridge.ts'
+Restart=always
+RestartSec=10
+StandardOutput=append:%h/Development/whatsapp-bridge/data/bridge.log
+StandardError=append:%h/Development/whatsapp-bridge/data/bridge.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=WhatsApp-Bridge: taeglicher Check, ob bridge.log rotiert werden muss
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

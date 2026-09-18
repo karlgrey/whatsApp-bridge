@@ -1,0 +1,18 @@
+[Unit]
+Description=WhatsApp-Bridge: bridge.log rotieren (logrotate-frei, kein Root noetig)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Development/whatsapp-bridge
+# Einfache Ein-Generationen-Rotation ohne logrotate (User claude hat kein
+# sudo, /etc/logrotate.d ist ihm verschlossen): oberhalb von 20 MB wird
+# bridge.log auf bridge.log.1 verschoben und ein neues, leeres File erzeugt.
+# Der laufende Service schreibt weiter per StandardOutput=append in den
+# (neuen) Pfad, weil append: das File bei jedem Schreibzugriff neu oeffnet.
+ExecStart=/bin/bash -c '\
+  f="%h/Development/whatsapp-bridge/data/bridge.log"; \
+  if [ -f "$f" ] && [ "$(stat -c%%s "$f" 2>/dev/null || echo 0)" -gt 20971520 ]; then \
+    mv -f "$f" "$f.1"; \
+    : > "$f"; \
+    echo "$(date -Is) rotate: bridge.log -> bridge.log.1" >> "$f"; \
+  fi'
